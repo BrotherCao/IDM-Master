@@ -1,3 +1,5 @@
+use std::fs::{self, File};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,8 +32,7 @@ struct InnerTask {
     paused: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// 下载任务调度器。
-/// 负责：接收任务 → HEAD 探测 → 分段 → 并发下载 → 进度上报。
+/// 下载任务调度器
 pub struct DownloadScheduler {
     pool: ConnectionPool,
     semaphore: Arc<Semaphore>,
@@ -50,18 +51,20 @@ impl DownloadScheduler {
         }
     }
 
-    /// 设置进度回调
     pub fn on_progress<F: Fn(ProgressEvent) + Send + Sync + 'static>(&self, f: F) {
         *self.on_progress.write() = Some(Box::new(f));
     }
 
-    /// 提交下载任务
+    /// 提交下载任务：HEAD 探测 → 创建文件 → 分段 → 并发下载并写盘 → 完成
     pub async fn submit(&self, url: String, save_dir: PathBuf) -> Result<Uuid, anyhow::Error> {
         let head = self.pool.fetch_head(&url).await?;
         let filename = head.filename.unwrap_or_else(|| "download.bin".to_owned());
         let file_path = save_dir.join(&filename);
 
-        let mut task = DownloadTask::new(url.clone(), filename.clone(), file_path);
+        // 确保保存目录存在
+        fs::create_dir_all(&save_dir)?;
+
+        let mut task = DownloadTask::new(url.clone(), filename.clone(), file_path.clone());
         task.total_size = head.content_length;
         let n = DownloadTask::segment_count_for_size(head.content_length);
         task.split_segments(n);
@@ -84,9 +87,9 @@ impl DownloadScheduler {
 
         tokio::spawn(async move {
             let result = run_segments(
-            client.clone(), Arc::clone(&sem), Arc::clone(&handles), Arc::clone(&on_prog),
-            id, &url, Arc::clone(&abort), Arc::clone(&paused)
-        ).await;
+                client.clone(), Arc::clone(&sem), Arc::clone(&handles), Arc::clone(&on_prog),
+                id, &url, Arc::clone(&abort), Arc::clone(&paused), file_path,
+            ).await;
             match result {
                 Ok(_) => emit_state(&handles, &on_prog, id, TaskState::Completed),
                 Err(e) => emit_state(&handles, &on_prog, id, TaskState::Error(e.to_string())),
@@ -118,7 +121,7 @@ impl DownloadScheduler {
     }
 }
 
-/// 核心下载循环：为每个分段启动一个协程，并发下载。
+/// 核心下载循环：分段并发下载 + 写入磁盘
 async fn run_segments(
     client: reqwest::Client,
     sem: Arc<Semaphore>,
@@ -128,12 +131,17 @@ async fn run_segments(
     url: &str,
     abort: Arc<std::sync::atomic::AtomicBool>,
     paused: Arc<std::sync::atomic::AtomicBool>,
+    file_path: PathBuf,
 ) -> Result<(), anyhow::Error> {
     let segments: Vec<Arc<Segment>> = {
         handles.get(&id)
             .ok_or_else(|| anyhow::anyhow!("task not found"))?
             .task.segments.clone()
     };
+
+    // 创建/打开文件，用 Arc<Mutex<File>> 在多分段间共享
+    let file = File::create(&file_path)?;
+    let shared_file = Arc::new(std::sync::Mutex::new(file));
 
     let mut join_set = tokio::task::JoinSet::new();
 
@@ -146,6 +154,7 @@ async fn run_segments(
         let abort = Arc::clone(&abort);
         let paused = Arc::clone(&paused);
         let url = url.to_owned();
+        let shared_file = Arc::clone(&shared_file);
 
         join_set.spawn(async move {
             let _permit = sem.acquire().await.unwrap();
@@ -162,11 +171,23 @@ async fn run_segments(
 
             use futures_util::StreamExt;
             let mut stream = resp.bytes_stream();
+            let mut write_offset = start;
+
             while let Some(chunk) = stream.next().await {
                 if abort.load(std::sync::atomic::Ordering::Relaxed) { break; }
                 wait_if_paused(&abort, &paused).await;
                 let chunk = chunk?;
+
+                // 写入文件 — 短暂持锁
+                {
+                    let mut f = shared_file.lock().unwrap();
+                    f.seek(SeekFrom::Start(write_offset))?;
+                    f.write_all(&chunk)?;
+                }
+
+                write_offset += chunk.len() as u64;
                 seg.add_downloaded(chunk.len() as u64);
+
                 if let Some(h) = handles.get(&id) {
                     h.speed_meter.record(chunk.len() as u64);
                     fire_progress(&on_prog, &h.task, h.speed_meter.speed_bps());
@@ -176,9 +197,20 @@ async fn run_segments(
         });
     }
 
+    // 等待所有分段完成
     while let Some(r) = join_set.join_next().await {
         r??;
     }
+
+    // 截断文件到正确大小（如果有预分配的话）
+    if let Some(h) = handles.get(&id) {
+        let total = h.task.total_size;
+        if total > 0 {
+            let f = shared_file.lock().unwrap();
+            f.set_len(total)?;
+        }
+    }
+
     Ok(())
 }
 
