@@ -1753,8 +1753,10 @@ dependencies = [
  "parking_lot",
  "reqwest 0.12.28",
  "rusqlite",
+ "serde",
  "tempfile",
  "tokio",
+ "url",
  "uuid",
 ]
 

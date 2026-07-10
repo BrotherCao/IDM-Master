@@ -2,6 +2,7 @@ mod server;
 
 use idm_engine::engine::connection::ConnectionPool;
 use idm_engine::engine::db::Database;
+use idm_engine::engine::rules::SiteRule;
 use idm_engine::engine::scheduler::{DownloadScheduler, ProgressEvent};
 use idm_engine::engine::task::TaskState;
 use serde::Serialize;
@@ -134,6 +135,27 @@ async fn get_classify() -> Result<bool, String> {
     Ok(get_scheduler().lock().await.classify_enabled())
 }
 
+#[tauri::command]
+async fn add_rule(domain_pattern: String, save_path: Option<String>, max_connections: usize) -> Result<String, String> {
+    let mut rule = SiteRule::new(&domain_pattern);
+    rule.save_path = save_path;
+    rule.max_connections = max_connections;
+    let id = rule.id.clone();
+    get_scheduler().lock().await.add_rule(rule);
+    Ok(id)
+}
+
+#[tauri::command]
+async fn remove_rule(id: String) -> Result<(), String> {
+    get_scheduler().lock().await.remove_rule(&id);
+    Ok(())
+}
+
+#[tauri::command]
+async fn list_rules() -> Result<Vec<SiteRule>, String> {
+    Ok(get_scheduler().lock().await.list_rules())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let sched = get_scheduler();
@@ -148,6 +170,9 @@ pub fn run() {
             list_tasks,
             set_classify,
             get_classify,
+            add_rule,
+            remove_rule,
+            list_rules,
         ])
         .setup(move |app| {
             use tauri::{

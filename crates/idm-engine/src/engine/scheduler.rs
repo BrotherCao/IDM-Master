@@ -12,6 +12,7 @@ use uuid::Uuid;
 use super::classify;
 use super::connection::ConnectionPool;
 use super::db::Database;
+use super::rules::{RuleEngine, SiteRule};
 use super::speed::SpeedMeter;
 use super::task::{DownloadTask, Segment, TaskState};
 
@@ -42,6 +43,7 @@ pub struct DownloadScheduler {
     on_progress: Arc<RwLock<Option<Box<dyn Fn(ProgressEvent) + Send + Sync>>>>,
     db: Option<Arc<Database>>,
     classify_enabled: std::sync::atomic::AtomicBool,
+    rules: parking_lot::Mutex<RuleEngine>,
 }
 
 impl DownloadScheduler {
@@ -54,6 +56,7 @@ impl DownloadScheduler {
             on_progress: Arc::new(RwLock::new(None)),
             db: None,
             classify_enabled: std::sync::atomic::AtomicBool::new(true),
+            rules: parking_lot::Mutex::new(RuleEngine::new()),
         }
     }
 
@@ -67,6 +70,7 @@ impl DownloadScheduler {
             on_progress: Arc::new(RwLock::new(None)),
             db: Some(db),
             classify_enabled: std::sync::atomic::AtomicBool::new(true),
+            rules: parking_lot::Mutex::new(RuleEngine::new()),
         }
     }
 
@@ -78,6 +82,31 @@ impl DownloadScheduler {
     /// 获取分类状态
     pub fn classify_enabled(&self) -> bool {
         self.classify_enabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 添加站点规则
+    pub fn add_rule(&self, rule: SiteRule) {
+        self.rules.lock().add(rule);
+    }
+
+    /// 删除站点规则
+    pub fn remove_rule(&self, id: &str) {
+        self.rules.lock().remove(id);
+    }
+
+    /// 列出所有站点规则
+    pub fn list_rules(&self) -> Vec<SiteRule> {
+        self.rules.lock().list().to_vec()
+    }
+
+    /// 根据 URL 解析保存目录（应用站点规则 + 分类）
+    pub fn resolve_save_dir(&self, url: &str, base_dir: PathBuf) -> PathBuf {
+        let dir = self.rules.lock().resolve_save_dir(url, base_dir);
+        if self.classify_enabled() {
+            // 需要文件名才能分类 — 这里先返回规则解析的目录
+            // 分类在 submit_inner 中进一步处理
+        }
+        dir
     }
 
     pub fn on_progress<F: Fn(ProgressEvent) + Send + Sync + 'static>(&self, f: F) {
@@ -117,6 +146,9 @@ impl DownloadScheduler {
             .filter(|f| !f.is_empty())
             .or(head.filename)
             .unwrap_or_else(|| "download.bin".to_owned());
+
+        // 应用站点规则解析保存目录
+        let save_dir = self.rules.lock().resolve_save_dir(&url, save_dir);
 
         // 下载分类：按文件类型自动分到子目录
         let save_dir = if self.classify_enabled() {

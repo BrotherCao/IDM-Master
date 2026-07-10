@@ -5,3 +5,4 @@ pub mod connection;
 pub mod scheduler;
 pub mod db;
 pub mod classify;
+pub mod rules;
