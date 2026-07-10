@@ -38,6 +38,16 @@ export async function listTasks(): Promise<TaskInfoPayload[]> {
   return invoke("list_tasks");
 }
 
+/** 设置分类开关 */
+export async function setClassify(enabled: boolean): Promise<void> {
+  return invoke("set_classify", { enabled });
+}
+
+/** 获取分类状态 */
+export async function getClassify(): Promise<boolean> {
+  return invoke("get_classify");
+}
+
 /** 监听下载进度事件并更新 store */
 export async function listenToProgress() {
   await listen<TaskInfoPayload>("download-progress", (event) => {
