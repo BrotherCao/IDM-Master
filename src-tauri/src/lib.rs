@@ -5,7 +5,7 @@ use idm_engine::engine::task::TaskState;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 
 static SCHEDULER: OnceLock<Mutex<DownloadScheduler>> = OnceLock::new();
@@ -134,6 +134,51 @@ pub fn run() {
             cancel_task,
             list_tasks,
         ])
+        .setup(|app| {
+            use tauri::{
+                image::Image,
+                menu::{MenuBuilder, MenuItemBuilder},
+                tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+            };
+
+            let show = MenuItemBuilder::with_id("show", "显示").build(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
+            let menu = MenuBuilder::new(app).items(&[&show, &quit]).build()?;
+
+            let icon = Image::from_bytes(include_bytes!("../icons/icon.ico"))
+                .unwrap_or_else(|_| Image::new(&[], 0, 0));
+
+            let _tray = TrayIconBuilder::new()
+                .icon(icon)
+                .menu(&menu)
+                .tooltip("IDM Master")
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        if let Some(window) = tray.app_handle().get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
