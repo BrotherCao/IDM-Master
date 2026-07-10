@@ -2,3 +2,5 @@
 **/*.rs.bk
 *.pdb
 test_downloads/
+node_modules/
+dist/
