@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -33,6 +33,8 @@ struct InnerTask {
     speed_meter: SpeedMeter,
     abort: Arc<std::sync::atomic::AtomicBool>,
     paused: Arc<std::sync::atomic::AtomicBool>,
+    /// 计划开始时间（None = 立即开始）
+    scheduled_at: Option<u64>,
 }
 
 /// 下载任务调度器
@@ -115,7 +117,12 @@ impl DownloadScheduler {
 
     /// 提交下载任务：HEAD 探测 → 创建文件 → 分段 → 并发下载并写盘 → 完成
     pub async fn submit(&self, url: String, save_dir: PathBuf) -> Result<Uuid, anyhow::Error> {
-        self.submit_inner(url, save_dir, None, None, None, None).await
+        self.submit_inner(url, save_dir, None, None, None, None, None).await
+    }
+
+    /// 提交定时下载任务（延迟到指定时刻开始）
+    pub async fn submit_scheduled(&self, url: String, save_dir: PathBuf, start_at: u64) -> Result<Uuid, anyhow::Error> {
+        self.submit_inner(url, save_dir, None, None, None, None, Some(start_at)).await
     }
 
     /// 提交下载（含元数据）：由 Chrome 扩展调用，带有文件名、referer、cookies
@@ -128,7 +135,7 @@ impl DownloadScheduler {
         _user_agent: Option<String>,
     ) -> Result<Uuid, anyhow::Error> {
         // 使用 HEAD 获取文件名，Chrome 扩展可能不传
-        self.submit_inner(url, save_dir, None, _referer, _cookies, _user_agent).await
+        self.submit_inner(url, save_dir, None, _referer, _cookies, _user_agent, None).await
     }
 
     /// 内部统一入口
@@ -140,6 +147,7 @@ impl DownloadScheduler {
         _referer: Option<String>,
         _cookies: Option<String>,
         _user_agent: Option<String>,
+        scheduled_at: Option<u64>,
     ) -> Result<Uuid, anyhow::Error> {
         let head = self.pool.fetch_head(&url).await?;
         let filename = filename_hint
@@ -184,6 +192,7 @@ impl DownloadScheduler {
             speed_meter: SpeedMeter::new(Duration::from_secs(5)),
             abort: Arc::clone(&abort),
             paused: Arc::clone(&paused),
+            scheduled_at,
         });
 
         let client = self.pool.client().clone();
@@ -192,6 +201,22 @@ impl DownloadScheduler {
         let on_prog = Arc::clone(&self.on_progress);
 
         tokio::spawn(async move {
+            // 定时下载：等待到计划时间
+            if let Some(ts) = scheduled_at {
+                let target = UNIX_EPOCH + Duration::from_secs(ts);
+                if let Ok(dur) = target.duration_since(SystemTime::now()) {
+                    // 最多提前 24 小时
+                    let dur = dur.min(Duration::from_secs(86400));
+                    emit_state(&handles, &on_prog, id, TaskState::Pending);
+                    tokio::time::sleep(dur).await;
+                }
+            }
+
+            if abort.load(std::sync::atomic::Ordering::Relaxed) {
+                emit_state(&handles, &on_prog, id, TaskState::Cancelled);
+                return;
+            }
+
             let result = run_segments(
                 client.clone(), Arc::clone(&sem), Arc::clone(&handles), Arc::clone(&on_prog),
                 id, &url, Arc::clone(&abort), Arc::clone(&paused), file_path,
