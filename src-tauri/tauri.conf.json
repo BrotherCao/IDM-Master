@@ -25,5 +25,21 @@
       "csp": null
     }
   },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"]
+      },
+      "wix": {
+        "language": "zh-CN"
+      }
+    }
+  },
   "plugins": {}
 }
