@@ -72,8 +72,37 @@ impl DownloadScheduler {
 
     /// 提交下载任务：HEAD 探测 → 创建文件 → 分段 → 并发下载并写盘 → 完成
     pub async fn submit(&self, url: String, save_dir: PathBuf) -> Result<Uuid, anyhow::Error> {
+        self.submit_inner(url, save_dir, None, None, None, None).await
+    }
+
+    /// 提交下载（含元数据）：由 Chrome 扩展调用，带有文件名、referer、cookies
+    pub async fn submit_with_meta(
+        &self,
+        url: String,
+        save_dir: PathBuf,
+        _referer: Option<String>,
+        _cookies: Option<String>,
+        _user_agent: Option<String>,
+    ) -> Result<Uuid, anyhow::Error> {
+        // 使用 HEAD 获取文件名，Chrome 扩展可能不传
+        self.submit_inner(url, save_dir, None, _referer, _cookies, _user_agent).await
+    }
+
+    /// 内部统一入口
+    async fn submit_inner(
+        &self,
+        url: String,
+        save_dir: PathBuf,
+        filename_hint: Option<String>,
+        _referer: Option<String>,
+        _cookies: Option<String>,
+        _user_agent: Option<String>,
+    ) -> Result<Uuid, anyhow::Error> {
         let head = self.pool.fetch_head(&url).await?;
-        let filename = head.filename.unwrap_or_else(|| "download.bin".to_owned());
+        let filename = filename_hint
+            .filter(|f| !f.is_empty())
+            .or(head.filename)
+            .unwrap_or_else(|| "download.bin".to_owned());
         let file_path = save_dir.join(&filename);
 
         // 确保保存目录存在

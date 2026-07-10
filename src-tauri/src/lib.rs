@@ -1,3 +1,5 @@
+mod server;
+
 use idm_engine::engine::connection::ConnectionPool;
 use idm_engine::engine::db::Database;
 use idm_engine::engine::scheduler::{DownloadScheduler, ProgressEvent};
@@ -8,22 +10,22 @@ use std::sync::{Arc, OnceLock};
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 
-static SCHEDULER: OnceLock<Mutex<DownloadScheduler>> = OnceLock::new();
+static SCHEDULER: OnceLock<Arc<Mutex<DownloadScheduler>>> = OnceLock::new();
 
-fn get_scheduler() -> &'static Mutex<DownloadScheduler> {
-    SCHEDULER.get_or_init(|| {
+fn get_scheduler() -> Arc<Mutex<DownloadScheduler>> {
+    Arc::clone(SCHEDULER.get_or_init(|| {
         let pool = ConnectionPool::new(32);
-        let app_dir = dirs_next().unwrap_or_else(|| PathBuf::from("."));
+        let app_dir = dirs_app().unwrap_or_else(|| PathBuf::from("."));
         let db_path = app_dir.join("idm-master.db");
-        match Database::open(&db_path) {
-            Ok(db) => Mutex::new(DownloadScheduler::with_db(pool, Arc::new(db))),
-            Err(_) => Mutex::new(DownloadScheduler::new(pool)),
-        }
-    })
+        let sched = match Database::open(&db_path) {
+            Ok(db) => DownloadScheduler::with_db(pool, Arc::new(db)),
+            Err(_) => DownloadScheduler::new(pool),
+        };
+        Arc::new(Mutex::new(sched))
+    }))
 }
 
-fn dirs_next() -> Option<PathBuf> {
-    // 使用 Windows AppData 目录
+fn dirs_app() -> Option<PathBuf> {
     std::env::var("APPDATA").ok().map(|d| PathBuf::from(d).join("IDM-Master"))
 }
 
@@ -64,13 +66,13 @@ impl From<ProgressEvent> for TaskInfo {
 
 #[tauri::command]
 async fn add_download(url: String, save_dir: String, window: tauri::Window) -> Result<String, String> {
-    let s = get_scheduler().lock().await;
-    s.on_progress(move |ev: ProgressEvent| {
+    let s = get_scheduler();
+    s.lock().await.on_progress(move |ev: ProgressEvent| {
         let info = TaskInfo::from(ev);
         let _ = window.emit("download-progress", &info);
     });
     let path = PathBuf::from(&save_dir);
-    let id = s.submit(url, path).await.map_err(|e| e.to_string())?;
+    let id = s.lock().await.submit(url, path).await.map_err(|e| e.to_string())?;
     Ok(id.to_string())
 }
 
@@ -123,7 +125,8 @@ async fn list_tasks() -> Result<Vec<TaskInfo>, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    get_scheduler(); // 预热调度器
+    // 预热调度器，获取 Arc 副本供 HTTP Server 使用
+    let sched = get_scheduler();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -134,13 +137,20 @@ pub fn run() {
             cancel_task,
             list_tasks,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             use tauri::{
                 image::Image,
                 menu::{MenuBuilder, MenuItemBuilder},
                 tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
             };
 
+            // ── 启动本地 HTTP Server (127.0.0.1:16888) ──
+            let server_state = server::AppState {
+                scheduler: sched.clone(),
+            };
+            tauri::async_runtime::spawn(server::start_server(server_state));
+
+            // ── 系统托盘 ──
             let show = MenuItemBuilder::with_id("show", "显示").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
             let menu = MenuBuilder::new(app).items(&[&show, &quit]).build()?;
