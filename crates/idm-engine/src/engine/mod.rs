@@ -3,3 +3,4 @@ pub mod speed;
 pub mod writer;
 pub mod connection;
 pub mod scheduler;
+pub mod db;

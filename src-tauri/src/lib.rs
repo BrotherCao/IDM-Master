@@ -1,9 +1,10 @@
 use idm_engine::engine::connection::ConnectionPool;
+use idm_engine::engine::db::Database;
 use idm_engine::engine::scheduler::{DownloadScheduler, ProgressEvent};
 use idm_engine::engine::task::TaskState;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tauri::Emitter;
 use tokio::sync::Mutex;
 
@@ -12,8 +13,18 @@ static SCHEDULER: OnceLock<Mutex<DownloadScheduler>> = OnceLock::new();
 fn get_scheduler() -> &'static Mutex<DownloadScheduler> {
     SCHEDULER.get_or_init(|| {
         let pool = ConnectionPool::new(32);
-        Mutex::new(DownloadScheduler::new(pool))
+        let app_dir = dirs_next().unwrap_or_else(|| PathBuf::from("."));
+        let db_path = app_dir.join("idm-master.db");
+        match Database::open(&db_path) {
+            Ok(db) => Mutex::new(DownloadScheduler::with_db(pool, Arc::new(db))),
+            Err(_) => Mutex::new(DownloadScheduler::new(pool)),
+        }
     })
+}
+
+fn dirs_next() -> Option<PathBuf> {
+    // 使用 Windows AppData 目录
+    std::env::var("APPDATA").ok().map(|d| PathBuf::from(d).join("IDM-Master"))
 }
 
 #[derive(Debug, Clone, Serialize)]

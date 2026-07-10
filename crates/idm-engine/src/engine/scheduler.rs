@@ -10,6 +10,7 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use super::connection::ConnectionPool;
+use super::db::Database;
 use super::speed::SpeedMeter;
 use super::task::{DownloadTask, Segment, TaskState};
 
@@ -38,6 +39,7 @@ pub struct DownloadScheduler {
     semaphore: Arc<Semaphore>,
     handles: Arc<DashMap<Uuid, InnerTask>>,
     on_progress: Arc<RwLock<Option<Box<dyn Fn(ProgressEvent) + Send + Sync>>>>,
+    db: Option<Arc<Database>>,
 }
 
 impl DownloadScheduler {
@@ -48,6 +50,19 @@ impl DownloadScheduler {
             semaphore: sem,
             handles: Arc::new(DashMap::new()),
             on_progress: Arc::new(RwLock::new(None)),
+            db: None,
+        }
+    }
+
+    /// 创建带数据库持久化的调度器
+    pub fn with_db(pool: ConnectionPool, db: Arc<Database>) -> Self {
+        let sem = pool.semaphore();
+        Self {
+            pool,
+            semaphore: sem,
+            handles: Arc::new(DashMap::new()),
+            on_progress: Arc::new(RwLock::new(None)),
+            db: Some(db),
         }
     }
 
@@ -70,6 +85,14 @@ impl DownloadScheduler {
         task.split_segments(n);
 
         let id = task.id;
+
+        // 持久化到 SQLite
+        if let Some(ref db) = self.db {
+            let _ = db.save_task(id, &url, &filename,
+                &file_path.to_string_lossy(),
+                head.content_length, 0, "running");
+        }
+
         let abort = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
