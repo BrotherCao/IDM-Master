@@ -4,3 +4,4 @@ pub mod writer;
 pub mod connection;
 pub mod scheduler;
 pub mod db;
+pub mod classify;

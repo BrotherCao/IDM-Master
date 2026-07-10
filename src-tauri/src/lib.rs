@@ -123,9 +123,19 @@ async fn list_tasks() -> Result<Vec<TaskInfo>, String> {
         .collect())
 }
 
+#[tauri::command]
+async fn set_classify(enabled: bool) -> Result<(), String> {
+    get_scheduler().lock().await.set_classify_enabled(enabled);
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_classify() -> Result<bool, String> {
+    Ok(get_scheduler().lock().await.classify_enabled())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 预热调度器，获取 Arc 副本供 HTTP Server 使用
     let sched = get_scheduler();
 
     tauri::Builder::default()
@@ -136,6 +146,8 @@ pub fn run() {
             resume_task,
             cancel_task,
             list_tasks,
+            set_classify,
+            get_classify,
         ])
         .setup(move |app| {
             use tauri::{

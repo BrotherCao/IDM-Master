@@ -9,6 +9,7 @@ use parking_lot::RwLock;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+use super::classify;
 use super::connection::ConnectionPool;
 use super::db::Database;
 use super::speed::SpeedMeter;
@@ -40,6 +41,7 @@ pub struct DownloadScheduler {
     handles: Arc<DashMap<Uuid, InnerTask>>,
     on_progress: Arc<RwLock<Option<Box<dyn Fn(ProgressEvent) + Send + Sync>>>>,
     db: Option<Arc<Database>>,
+    classify_enabled: std::sync::atomic::AtomicBool,
 }
 
 impl DownloadScheduler {
@@ -51,6 +53,7 @@ impl DownloadScheduler {
             handles: Arc::new(DashMap::new()),
             on_progress: Arc::new(RwLock::new(None)),
             db: None,
+            classify_enabled: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -63,7 +66,18 @@ impl DownloadScheduler {
             handles: Arc::new(DashMap::new()),
             on_progress: Arc::new(RwLock::new(None)),
             db: Some(db),
+            classify_enabled: std::sync::atomic::AtomicBool::new(true),
         }
+    }
+
+    /// 启用/禁用自动文件分类
+    pub fn set_classify_enabled(&self, enabled: bool) {
+        self.classify_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 获取分类状态
+    pub fn classify_enabled(&self) -> bool {
+        self.classify_enabled.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn on_progress<F: Fn(ProgressEvent) + Send + Sync + 'static>(&self, f: F) {
@@ -103,6 +117,14 @@ impl DownloadScheduler {
             .filter(|f| !f.is_empty())
             .or(head.filename)
             .unwrap_or_else(|| "download.bin".to_owned());
+
+        // 下载分类：按文件类型自动分到子目录
+        let save_dir = if self.classify_enabled() {
+            let cat = classify::classify_filename(&filename);
+            save_dir.join(cat.dir_name_en())
+        } else {
+            save_dir
+        };
         let file_path = save_dir.join(&filename);
 
         // 确保保存目录存在
