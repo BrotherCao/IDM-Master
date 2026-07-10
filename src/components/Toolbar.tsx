@@ -8,13 +8,6 @@ export function Toolbar() {
   const [saveDir, setSaveDir] = useState("");
   const [classifyEnabled, setClassifyEnabled] = useState(true);
 
-  // 初始化保存目录为 Downloads
-  if (!saveDir) {
-    import("@tauri-apps/plugin-dialog").then(({ defaultDownloadDir }) => {
-      defaultDownloadDir?.().then(d => { if (d) setSaveDir(d); });
-    }).catch(() => setSaveDir("."));
-  }
-
   // ── 文件夹选择器 ──
   const pickFolder = async () => {
     try {
